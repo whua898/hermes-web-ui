@@ -202,13 +202,11 @@ export async function remove(ctx: any) {
     if (!removed) {
       ctx.status = 404; ctx.body = { error: `Custom provider "${poolKey}" not found` }; return
     }
-    if (!isCustom) {
-      const envMapping = PROVIDER_ENV_MAP[poolKey]
-      if (!envMapping) {
-        ctx.status = 404; ctx.body = { error: `Provider "${poolKey}" not found` }; return
-      }
+    // Only clear credential pool for custom providers
+    // Builtin providers store API keys in environment variables (cleared above)
+    if (isCustom) {
+      await clearStoredAuthProvider(poolKey)
     }
-    await clearStoredAuthProvider(poolKey)
     // TODO: Test if provider works without gateway restart
     // try { await hermesCli.restartGateway() } catch (e: any) { logger.error(e, 'Gateway restart failed') }
     ctx.body = { success: true }

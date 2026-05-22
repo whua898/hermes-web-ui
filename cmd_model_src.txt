@@ -1,0 +1,4 @@
+def cmd_model(args):
+    """Select default model — starts with provider selection, then model picker."""
+    _require_tty("model")
+    select_provider_and_model(args=args)

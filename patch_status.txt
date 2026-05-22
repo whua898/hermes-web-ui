@@ -1,0 +1,32 @@
+============================================================
+补丁状态检查 - hermes-agent v0.14.0
+============================================================
+
+✓ Patch1: sitecustomize.py
+  - CREATE_NO_WINDOW: True
+  - utf-8 encoding: True
+
+✓ Patch2c: models.py
+  - filter_agentic_models: True
+  - _NOISE_PATTERNS: True
+  - limit parameter: False
+
+✓ Patch2b: model_switch.py
+  - NVIDIA live API: True
+  - patch 2b marker: True
+
+✓ Patch7: main.py
+  - nvidia branch: True
+
+? Patch-cli: cli.py
+  - finally blocks: 15
+  - return statements: 674
+  - 需要手动检查是否有 finally 块中的 return
+
+============================================================
+总结
+============================================================
+✓ 已应用: Patch1, Patch2c, Patch2b, Patch7
+? 待确认: Patch-cli (finally/return)
+
+运行 'hermes' 命令查看是否有 SyntaxWarning

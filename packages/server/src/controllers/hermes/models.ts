@@ -187,6 +187,13 @@ function cachedProviderModels(
 }
 
 
+// -- NVIDIA agentic model filtering (mirrors Python's filter_agentic_models) --
+const _NOISE_PATTERNS = /(?:(?:whisper|speech|tts|asr|embed|retriev|rerank|clip|vision|image-gen|stable-diff|dall-e|inpaint|depth|segment|sam|detect|yolo|ocr|layout|norm|guard|reward|judge|eval|safety|moderat|guardrail|cache|index|store|retriev|bge-|e5-|gte-|jina-|nomic-|codestral-embed|llama-3\.?2-vision|llava|fuyu|kosmos|cogvlm|qwen-vl|pixtral|molmo|aria|phi-3\.5-vision|minicpm-v|nvidia\/clip|nvidia\/neva|nvidia\/deepstream|nvidia\/llava|nvidia\/sdxl|nvidia\/parakeet|nvidia\/cosmos|nvidia\/stable|nvidia\/dream|nvidia\/egorr|nvidia\/unity|nvidia\/mistralocr|astro|voyager-3|codestral-22b|pixtral-12b))/i
+
+function filterAgenticModels(modelIds: string[]): string[] {
+  return modelIds.filter(id => !_NOISE_PATTERNS.test(id))
+}
+
 // Copilot 授权检测：复用同一套 token 解析逻辑（含 ~/.config/github-copilot/apps.json
 // 与 ghp_ PAT 跳过），与 getCopilotModels 行为一致，避免出现"模型能拉到却被判未授权"。
 async function isCopilotAuthorized(envContent: string): Promise<boolean> {
@@ -304,6 +311,17 @@ async function buildAvailableForProfile(
         if (apiKey) {
           const fetched = await cachedProviderModels(fetchCache, baseUrl, apiKey, providerKey === 'openrouter')
           if (fetched.length > 0) modelsList = fetched
+        }
+      }
+    } else if (providerKey === 'nvidia') {
+      // NVIDIA: live-probe with agentic model filter
+      if (envMapping.api_key_env) {
+        const apiKey = envGetValue(envMapping.api_key_env)
+        if (apiKey) {
+          const fetched = await cachedProviderModels(fetchCache, baseUrl, apiKey, false)
+          if (fetched.length > 0) {
+            modelsList = filterAgenticModels(fetched)
+          }
         }
       }
     }

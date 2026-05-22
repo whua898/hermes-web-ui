@@ -69,6 +69,23 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     ],
   },
   {
+    label: 'NVIDIA',
+    value: 'nvidia',
+    builtin: true,
+    base_url: 'https://integrate.api.nvidia.com/v1',
+    models: [
+      'nvidia/nemotron-3-super-120b-a12b',
+      'nvidia/nemotron-3-nano-30b-a3b',
+      'nvidia/llama-3.3-nemotron-super-49b-v1.5',
+      'qwen/qwen3.5-397b-a17b',
+      'deepseek-ai/deepseek-v3.2',
+      'moonshotai/kimi-k2.6',
+      'minimaxai/minimax-m2.5',
+      'z-ai/glm5',
+      'openai/gpt-oss-120b',
+    ],
+  },
+  {
     label: 'DeepSeek',
     value: 'deepseek',
     builtin: true,

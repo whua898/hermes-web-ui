@@ -396,7 +396,7 @@ function handleClose() {
             style="flex: 1"
           />
           <NButton
-            v-if="providerType === 'custom' || (providerType === 'preset' && modelOptions.length === 0)"
+            v-if="providerType === 'custom' || providerType === 'preset'"
             :loading="fetchingModels"
             @click="fetchModels"
           >

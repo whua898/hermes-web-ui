@@ -1,0 +1,51 @@
+Line 4951: def _model_flow_api_key_provider(config, provider_id, current_model=""):
+4951: def _model_flow_api_key_provider(config, provider_id, current_model=""):
+4952:     """Generic flow for API-key providers (z.ai, MiniMax, OpenCode, etc.)."""
+4953:     from hermes_cli.auth import (
+4954:         LMSTUDIO_NOAUTH_PLACEHOLDER,
+4955:         PROVIDER_REGISTRY,
+4956:         _prompt_model_selection,
+4957:         _save_model_choice,
+4958:         deactivate_provider,
+4959:     )
+4960:     from hermes_cli.config import (
+4961:         get_env_value,
+4962:         save_env_value,
+4963:         load_config,
+4964:         save_config,
+4965:     )
+4966:     from hermes_cli.models import (
+4967:         fetch_api_models,
+4968:         opencode_model_api_mode,
+4969:         normalize_opencode_model_id,
+4970:     )
+4971: 
+4972:     pconfig = PROVIDER_REGISTRY[provider_id]
+4973:     key_env = pconfig.api_key_env_vars[0] if pconfig.api_key_env_vars else ""
+4974:     base_url_env = pconfig.base_url_env_var or ""
+4975: 
+4976:     # Check / prompt for API key
+4977:     existing_key = ""
+4978:     for ev in pconfig.api_key_env_vars:
+4979:         existing_key = get_env_value(ev) or os.getenv(ev, "")
+4980:         if existing_key:
+4981:             break
+4982: 
+4983:     existing_key, abort = _prompt_api_key(
+4984:         pconfig, existing_key, provider_id=provider_id
+4985:     )
+4986:     if abort:
+4987:         return
+4988: 
+4989:     # Gemini free-tier gate: free-tier daily quotas (<= 250 RPD for Flash)
+4990:     # are exhausted in a handful of agent turns, so refuse to wire up the
+4991:     # provider with a free-tier key. Probe is best-effort; network or auth
+4992:     # errors fall through without blocking.
+4993:     if provider_id == "gemini" and existing_key:
+4994:         try:
+4995:             from agent.gemini_native_adapter import probe_gemini_tier
+4996:         except Exception:
+4997:             probe_gemini_tier = None
+4998:         if probe_gemini_tier is not None:
+4999:             print("  Checking Gemini API tier...")
+5000:             probe_base = (

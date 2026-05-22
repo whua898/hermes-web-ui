@@ -1,0 +1,305 @@
+def select_provider_and_model(args=None):
+    """Core provider selection + model picking logic.
+
+    Shared by ``cmd_model`` (``hermes model``) and the setup wizard
+    (``setup_model_provider`` in setup.py).  Handles the full flow:
+    provider picker, credential prompting, model selection, and config
+    persistence.
+    """
+    from hermes_cli.auth import (
+        resolve_provider,
+        AuthError,
+        format_auth_error,
+    )
+    from hermes_cli.config import (
+        get_compatible_custom_providers,
+        load_config,
+        get_env_value,
+    )
+    from hermes_cli.providers import resolve_provider_full
+
+    config = load_config()
+    current_model = config.get("model")
+    if isinstance(current_model, dict):
+        current_model = current_model.get("default", "")
+    current_model = current_model or "(not set)"
+
+    # Read effective provider the same way the CLI does at startup:
+    # config.yaml model.provider > env var > auto-detect
+    config_provider = None
+    model_cfg = config.get("model")
+    if isinstance(model_cfg, dict):
+        config_provider = model_cfg.get("provider")
+
+    effective_provider = (
+        config_provider or os.getenv("HERMES_INFERENCE_PROVIDER") or "auto"
+    )
+    compatible_custom_providers = get_compatible_custom_providers(config)
+    active = None
+    if effective_provider != "auto":
+        active_def = resolve_provider_full(
+            effective_provider,
+            config.get("providers"),
+            compatible_custom_providers,
+        )
+        if active_def is not None:
+            active = active_def.id
+        else:
+            warning = (
+                f"Unknown provider '{effective_provider}'. Check 'hermes model' for "
+                "available providers, or run 'hermes doctor' to diagnose config "
+                "issues."
+            )
+            print(f"Warning: {warning} Falling back to auto provider detection.")
+    if active is None:
+        try:
+            active = resolve_provider("auto")
+        except AuthError as exc:
+            if effective_provider == "auto":
+                warning = format_auth_error(exc)
+                print(f"Warning: {warning} Falling back to auto provider detection.")
+            active = None  # no provider yet; default to first in list
+
+    # Detect custom endpoint
+    if active == "openrouter" and get_env_value("OPENAI_BASE_URL"):
+        active = "custom"
+
+    from hermes_cli.models import CANONICAL_PROVIDERS, _PROVIDER_LABELS
+
+    provider_labels = dict(_PROVIDER_LABELS)  # derive from canonical list
+    active_label = provider_labels.get(active, active) if active else "none"
+
+    print()
+    print(f"  Current model:    {current_model}")
+    print(f"  Active provider:  {active_label}")
+    print()
+
+    # Step 1: Provider selection — flat list from CANONICAL_PROVIDERS
+    all_providers = [(p.slug, p.tui_desc) for p in CANONICAL_PROVIDERS]
+
+    def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
+        from hermes_cli.config import read_raw_config
+
+        # Build a lookup of raw (un-expanded) api_key templates keyed by a
+        # stable identity. We intentionally bypass
+        # ``get_compatible_custom_providers(read_raw_config())`` here because
+        # its ``_normalize_custom_provider_entry`` step calls ``urlparse()``
+        # on ``base_url`` and drops any entry whose ``base_url`` is itself an
+        # env-ref template (e.g. ``${NEURALWATT_API_BASE}``). Dropping those
+        # entries is exactly how env-ref preservation fails for the user
+        # config that motivated this fix.
+        raw_api_key_refs: dict[tuple, str] = {}
+        raw_cfg = read_raw_config()
+
+        def _record_raw(
+            name: str,
+            provider_key: str,
+            model: str,
+            api_key: str,
+        ) -> None:
+            template = str(api_key or "").strip()
+            if "${" not in template:
+                return
+            name = str(name or "").strip()
+            provider_key = str(provider_key or "").strip()
+            model = str(model or "").strip()
+            # Index by every plausible identity the loaded (expanded) config
+            # might present: (name), (name, model), (provider_key), and
+            # (provider_key, model). Case-insensitive on name/provider_key so
+            # the loaded entry matches regardless of display casing.
+            if name:
+                raw_api_key_refs.setdefault((name.lower(),), template)
+                raw_api_key_refs.setdefault((name.lower(), model), template)
+            if provider_key:
+                raw_api_key_refs.setdefault((provider_key.lower(),), template)
+                raw_api_key_refs.setdefault((provider_key.lower(), model), template)
+
+        raw_list = raw_cfg.get("custom_providers")
+        if isinstance(raw_list, list):
+            for raw_entry in raw_list:
+                if not isinstance(raw_entry, dict):
+                    continue
+                _record_raw(
+                    raw_entry.get("name", ""),
+                    "",
+                    raw_entry.get("model", "") or raw_entry.get("default_model", ""),
+                    raw_entry.get("api_key", ""),
+                )
+        raw_providers = raw_cfg.get("providers")
+        if isinstance(raw_providers, dict):
+            for raw_key, raw_entry in raw_providers.items():
+                if not isinstance(raw_entry, dict):
+                    continue
+                _record_raw(
+                    raw_entry.get("name", "") or raw_key,
+                    raw_key,
+                    raw_entry.get("model", "") or raw_entry.get("default_model", ""),
+                    raw_entry.get("api_key", ""),
+                )
+
+        def _lookup_ref(name: str, provider_key: str, model: str) -> str:
+            name_lc = str(name or "").strip().lower()
+            pkey_lc = str(provider_key or "").strip().lower()
+            model = str(model or "").strip()
+            for identity in (
+                (pkey_lc, model),
+                (pkey_lc,),
+                (name_lc, model),
+                (name_lc,),
+            ):
+                if identity[0] and identity in raw_api_key_refs:
+                    return raw_api_key_refs[identity]
+            return ""
+
+        custom_provider_map = {}
+        for entry in get_compatible_custom_providers(cfg):
+            if not isinstance(entry, dict):
+                continue
+            name = (entry.get("name") or "").strip()
+            base_url = (entry.get("base_url") or "").strip()
+            if not name or not base_url:
+                continue
+            key = "custom:" + name.lower().replace(" ", "-")
+            provider_key = (entry.get("provider_key") or "").strip()
+            if provider_key:
+                try:
+                    resolve_provider(provider_key)
+                except AuthError:
+                    key = provider_key
+            custom_provider_map[key] = {
+                "name": name,
+                "base_url": base_url,
+                "api_key": entry.get("api_key", ""),
+                "key_env": entry.get("key_env", ""),
+                "model": entry.get("model", ""),
+                "api_mode": entry.get("api_mode", ""),
+                "provider_key": provider_key,
+                "api_key_ref": _lookup_ref(name, provider_key, entry.get("model", "")),
+            }
+        return custom_provider_map
+
+    # Add user-defined custom providers from config.yaml
+    _custom_provider_map = _named_custom_provider_map(
+        config
+    )  # key → {name, base_url, api_key}
+    for key, provider_info in _custom_provider_map.items():
+        name = provider_info["name"]
+        base_url = provider_info["base_url"]
+        short_url = base_url.replace("https://", "").replace("http://", "").rstrip("/")
+        saved_model = provider_info.get("model", "")
+        model_hint = f" — {saved_model}" if saved_model else ""
+        all_providers.append((key, f"{name} ({short_url}){model_hint}"))
+
+    # Build the menu
+    ordered = []
+    default_idx = 0
+    for key, label in all_providers:
+        if active and key == active:
+            ordered.append((key, f"{label}  ← currently active"))
+            default_idx = len(ordered) - 1
+        else:
+            ordered.append((key, label))
+
+    ordered.append(("custom", "Custom endpoint (enter URL manually)"))
+    _has_saved_custom_list = isinstance(config.get("custom_providers"), list) and bool(
+        config.get("custom_providers")
+    )
+    if _has_saved_custom_list:
+        ordered.append(("remove-custom", "Remove a saved custom provider"))
+    ordered.append(("aux-config", "Configure auxiliary models..."))
+    ordered.append(("cancel", "Leave unchanged"))
+
+    provider_idx = _prompt_provider_choice(
+        [label for _, label in ordered],
+        default=default_idx,
+    )
+    if provider_idx is None or ordered[provider_idx][0] == "cancel":
+        print("No change.")
+        return
+
+    selected_provider = ordered[provider_idx][0]
+
+    if selected_provider == "aux-config":
+        _aux_config_menu()
+        return
+
+    # Step 2: Provider-specific setup + model selection
+    if selected_provider == "openrouter":
+        _model_flow_openrouter(config, current_model)
+    elif selected_provider == "ai-gateway":
+        _model_flow_ai_gateway(config, current_model)
+    elif selected_provider == "nous":
+        _model_flow_nous(config, current_model, args=args)
+    elif selected_provider == "openai-codex":
+        _model_flow_openai_codex(config, current_model)
+    elif selected_provider == "xai-oauth":
+        _model_flow_xai_oauth(config, current_model)
+    elif selected_provider == "qwen-oauth":
+        _model_flow_qwen_oauth(config, current_model)
+    elif selected_provider == "minimax-oauth":
+        _model_flow_minimax_oauth(config, current_model, args=args)
+    elif selected_provider == "google-gemini-cli":
+        _model_flow_google_gemini_cli(config, current_model)
+    elif selected_provider == "copilot-acp":
+        _model_flow_copilot_acp(config, current_model)
+    elif selected_provider == "copilot":
+        _model_flow_copilot(config, current_model)
+    elif selected_provider == "custom":
+        _model_flow_custom(config)
+    elif (
+        selected_provider.startswith("custom:")
+        or selected_provider in _custom_provider_map
+    ):
+        provider_info = _named_custom_provider_map(load_config()).get(selected_provider)
+        if provider_info is None:
+            print(
+                "Warning: the selected saved custom provider is no longer available. "
+                "It may have been removed from config.yaml. No change."
+            )
+            return
+        _model_flow_named_custom(config, provider_info)
+    elif selected_provider == "remove-custom":
+        _remove_custom_provider(config)
+    elif selected_provider == "anthropic":
+        _model_flow_anthropic(config, current_model)
+    elif selected_provider == "kimi-coding":
+        _model_flow_kimi(config, current_model)
+    elif selected_provider == "stepfun":
+        _model_flow_stepfun(config, current_model)
+    elif selected_provider == "bedrock":
+        _model_flow_bedrock(config, current_model)
+    elif selected_provider == "azure-foundry":
+        _model_flow_azure_foundry(config, current_model)
+    elif selected_provider in {
+        "gemini",
+        "deepseek",
+        "xai",
+        "zai",
+        "kimi-coding-cn",
+        "minimax",
+        "minimax-cn",
+        "kilocode",
+        "opencode-zen",
+        "opencode-go",
+        "alibaba",
+        "huggingface",
+        "xiaomi",
+        "arcee",
+        "gmi",
+        "nvidia",
+        "ollama-cloud",
+        "tencent-tokenhub",
+        "lmstudio",
+    } or _is_profile_api_key_provider(selected_provider):
+        _model_flow_api_key_provider(config, selected_provider, current_model)
+
+    # ── Post-switch cleanup: clear stale OPENAI_BASE_URL ──────────────
+    # When the user switches to a named provider (anything except "custom"),
+    # a leftover OPENAI_BASE_URL in ~/.hermes/.env can poison auxiliary
+    # clients that use provider:auto. Clear it proactively.  (#5161)
+    if selected_provider not in {
+        "custom",
+        "cancel",
+        "remove-custom",
+    } and not selected_provider.startswith("custom:"):
+        _clear_stale_openai_base_url()

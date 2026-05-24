@@ -15,6 +15,7 @@ export interface StartRunRequest {
   input: string | ContentBlock[]
   instructions?: string
   session_id?: string
+  profile?: string
   model?: string
   provider?: string
   model_groups?: Array<{ provider: string; models: string[] }>
@@ -51,6 +52,24 @@ export interface RunEvent {
   session_id?: string
   /** Queue length from run.queued event */
   queue_length?: number
+  /** Queue item that was just removed because it is starting now. */
+  dequeued_queue_id?: string
+  /** Queued user messages from run.queued/resume payloads. */
+  queued_messages?: Array<{
+    id?: string | number
+    role?: string
+    content?: string
+    timestamp?: number
+    queued?: boolean
+  }>
+  /** User message broadcast to other windows already watching the same session. */
+  message?: {
+    id?: string | number
+    role?: string
+    content?: string
+    timestamp?: number
+    queued?: boolean
+  }
 }
 
 // ============================
@@ -59,6 +78,7 @@ export interface RunEvent {
 
 let chatRunSocket: Socket | null = null
 let globalListenersRegistered = false
+let chatRunSocketProfile: string | null = null
 
 /**
  * Session event handlers map
@@ -71,6 +91,7 @@ const sessionEventHandlers = new Map<string, {
   onReasoningAvailable: (event: RunEvent) => void
   onToolStarted: (event: RunEvent) => void
   onToolCompleted: (event: RunEvent) => void
+  onSubagentEvent?: (event: RunEvent) => void
   onRunStarted: (event: RunEvent) => void
   onRunCompleted: (event: RunEvent) => void
   onRunFailed: (event: RunEvent) => void
@@ -83,7 +104,10 @@ const sessionEventHandlers = new Map<string, {
   onRunQueued?: (event: RunEvent) => void
   onApprovalRequested?: (event: RunEvent) => void
   onApprovalResolved?: (event: RunEvent) => void
+  onPeerUserMessage?: (event: RunEvent) => void
 }>()
+
+const peerUserMessageHandlers = new Set<(event: RunEvent) => void>()
 
 /**
  * Global message.delta event handler
@@ -161,6 +185,16 @@ function globalToolCompletedHandler(event: RunEvent): void {
   const handlers = sessionEventHandlers.get(sid)
   if (handlers?.onToolCompleted) {
     handlers.onToolCompleted(event)
+  }
+}
+
+function globalSubagentEventHandler(event: RunEvent): void {
+  const sid = event.session_id
+  if (!sid) return
+
+  const handlers = sessionEventHandlers.get(sid)
+  if (handlers?.onSubagentEvent) {
+    handlers.onSubagentEvent(event)
   }
 }
 
@@ -324,6 +358,20 @@ function globalApprovalResolvedHandler(event: RunEvent): void {
   }
 }
 
+function globalPeerUserMessageHandler(event: RunEvent): void {
+  const sid = event.session_id
+  if (!sid) return
+
+  const handlers = sessionEventHandlers.get(sid)
+  if (handlers?.onPeerUserMessage) {
+    handlers.onPeerUserMessage(event)
+  }
+
+  for (const handler of peerUserMessageHandlers) {
+    handler(event)
+  }
+}
+
 /**
  * Register event handlers for a session
  * @param sessionId - Session ID
@@ -339,6 +387,7 @@ export function registerSessionHandlers(
     onReasoningAvailable: (event: RunEvent) => void
     onToolStarted: (event: RunEvent) => void
     onToolCompleted: (event: RunEvent) => void
+    onSubagentEvent?: (event: RunEvent) => void
     onRunStarted: (event: RunEvent) => void
     onRunCompleted: (event: RunEvent) => void
     onRunFailed: (event: RunEvent) => void
@@ -351,6 +400,7 @@ export function registerSessionHandlers(
     onRunQueued?: (event: RunEvent) => void
     onApprovalRequested?: (event: RunEvent) => void
     onApprovalResolved?: (event: RunEvent) => void
+    onPeerUserMessage?: (event: RunEvent) => void
   }
 ): () => void {
   sessionEventHandlers.set(sessionId, handlers)
@@ -367,6 +417,13 @@ export function registerSessionHandlers(
  */
 export function unregisterSessionHandlers(sessionId: string): void {
   sessionEventHandlers.delete(sessionId)
+}
+
+export function onPeerUserMessage(handler: (event: RunEvent) => void): () => void {
+  peerUserMessageHandlers.add(handler)
+  return () => {
+    peerUserMessageHandlers.delete(handler)
+  }
 }
 
 export function respondToolApproval(
@@ -386,29 +443,36 @@ export function getChatRunSocket(): Socket | null {
   return chatRunSocket
 }
 
-export function connectChatRun(): Socket {
-  if (chatRunSocket?.connected) return chatRunSocket
+export function connectChatRun(requestedProfile?: string | null): Socket {
+  const normalizedRequestedProfile = requestedProfile?.trim() || null
+  if (chatRunSocket?.connected && (!normalizedRequestedProfile || chatRunSocketProfile === normalizedRequestedProfile)) {
+    return chatRunSocket
+  }
 
   // Clean up old socket to prevent duplicate event listeners
   if (chatRunSocket) {
     chatRunSocket.removeAllListeners()
     chatRunSocket.disconnect()
     globalListenersRegistered = false
+    chatRunSocketProfile = null
   }
 
   const baseUrl = getBaseUrlValue()
   const token = getApiKey()
 
   // Get active profile from store (authoritative source)
-  let profile = 'default'
+  let profile = normalizedRequestedProfile || 'default'
   try {
-    const { useProfilesStore } = require('@/stores/hermes/profiles')
-    const profilesStore = useProfilesStore()
-    profile = profilesStore.activeProfileName || 'default'
+    if (!normalizedRequestedProfile) {
+      const { useProfilesStore } = require('@/stores/hermes/profiles')
+      const profilesStore = useProfilesStore()
+      profile = profilesStore.activeProfileName || 'default'
+    }
   } catch {
     // Fallback to localStorage during early initialization
-    profile = localStorage.getItem('hermes_active_profile_name') || 'default'
+    profile = normalizedRequestedProfile || localStorage.getItem('hermes_active_profile_name') || 'default'
   }
+  chatRunSocketProfile = profile
 
   chatRunSocket = io(`${baseUrl}/chat-run`, {
     auth: { token },
@@ -433,6 +497,10 @@ export function connectChatRun(): Socket {
     // Tool events
     chatRunSocket.on('tool.started', globalToolStartedHandler)
     chatRunSocket.on('tool.completed', globalToolCompletedHandler)
+    chatRunSocket.on('subagent.start', globalSubagentEventHandler)
+    chatRunSocket.on('subagent.tool', globalSubagentEventHandler)
+    chatRunSocket.on('subagent.progress', globalSubagentEventHandler)
+    chatRunSocket.on('subagent.complete', globalSubagentEventHandler)
 
     // Run lifecycle events
     chatRunSocket.on('run.started', globalRunStartedHandler)
@@ -441,6 +509,7 @@ export function connectChatRun(): Socket {
     chatRunSocket.on('run.queued', globalRunQueuedHandler)
     chatRunSocket.on('approval.requested', globalApprovalRequestedHandler)
     chatRunSocket.on('approval.resolved', globalApprovalResolvedHandler)
+    chatRunSocket.on('run.peer_user_message', globalPeerUserMessageHandler)
 
     // Compression events
     chatRunSocket.on('compression.started', globalCompressionStartedHandler)
@@ -462,6 +531,7 @@ export function disconnectChatRun(): void {
   if (chatRunSocket) {
     chatRunSocket.disconnect()
     chatRunSocket = null
+    chatRunSocketProfile = null
     globalListenersRegistered = false
     sessionEventHandlers.clear()
   }
@@ -488,12 +558,13 @@ function removeSocketListener(socket: Socket, event: string, handler: (...args: 
  */
 export function resumeSession(
   sessionId: string,
-  onResumed: (data: { session_id: string; messages: any[]; isWorking: boolean; isAborting?: boolean; events: any[]; inputTokens?: number; outputTokens?: number; contextTokens?: number; queueLength?: number }) => void,
+  onResumed: (data: { session_id: string; messages: any[]; isWorking: boolean; isAborting?: boolean; events: any[]; inputTokens?: number; outputTokens?: number; contextTokens?: number; queueLength?: number; queueMessages?: RunEvent['queued_messages'] }) => void,
+  profile?: string | null,
 ): Socket {
-  const socket = connectChatRun()
+  const socket = connectChatRun(profile)
 
   socket.once('resumed', onResumed)
-  socket.emit('resume', { session_id: sessionId })
+  socket.emit('resume', { session_id: sessionId, ...(profile ? { profile } : {}) })
 
   return socket
 }
@@ -511,7 +582,7 @@ export function startRunViaSocket(
   }
 
   let closed = false
-  const socket = connectChatRun()
+  const socket = connectChatRun(body.profile)
   const handleSocketError = (err: Error) => {
     if (closed) return
     closed = true
@@ -564,6 +635,10 @@ export function startRunViaSocket(
       onEvent(evt)
     },
     onToolCompleted: (evt: RunEvent) => {
+      if (closed) return
+      onEvent(evt)
+    },
+    onSubagentEvent: (evt: RunEvent) => {
       if (closed) return
       onEvent(evt)
     },
